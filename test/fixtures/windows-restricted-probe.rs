@@ -6,17 +6,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
     };
     use windows_sys::Win32::{
-        Foundation::{HANDLE, WAIT_OBJECT_0},
-        Security::{
-            CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE,
-            TOKEN_QUERY,
+        Foundation::{
+            HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_OBJECT_0,
         },
-        System::Threading::{
-            CREATE_NO_WINDOW, CreateProcessAsUserW, GetCurrentProcess, GetExitCodeProcess,
-            OpenProcessToken, PROCESS_INFORMATION, STARTUPINFOW, TerminateProcess,
-            WaitForSingleObject,
+        Security::{
+            ACL, ACL_REVISION, CreateRestrictedToken, DACL_SECURITY_INFORMATION,
+            DISABLE_MAX_PRIVILEGE, InitializeAcl, InitializeSecurityDescriptor,
+            SECURITY_DESCRIPTOR, SetKernelObjectSecurity, SetSecurityDescriptorDacl,
+            TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY, TOKEN_WRITE_DAC,
+        },
+        System::{
+            Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE},
+            Threading::{
+                CREATE_NO_WINDOW, CreateProcessAsUserW, GetCurrentProcess, GetExitCodeProcess,
+                OpenProcessToken, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOW,
+                TerminateProcess, WaitForSingleObject,
+            },
         },
     };
+
+    fn deny_token(process: HANDLE) -> io::Result<()> {
+        let mut token = std::ptr::null_mut();
+        if unsafe { OpenProcessToken(process, TOKEN_WRITE_DAC, &mut token) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let token = unsafe { OwnedHandle::from_raw_handle(token) };
+        let mut acl: ACL = unsafe { zeroed() };
+        let mut descriptor: SECURITY_DESCRIPTOR = unsafe { zeroed() };
+        let descriptor_ptr = (&mut descriptor as *mut SECURITY_DESCRIPTOR).cast();
+        if unsafe { InitializeAcl(&mut acl, size_of::<ACL>() as u32, ACL_REVISION) } == 0
+            || unsafe { InitializeSecurityDescriptor(descriptor_ptr, 1) } == 0
+            || unsafe { SetSecurityDescriptorDacl(descriptor_ptr, 1, &acl, 0) } == 0
+            || unsafe {
+                SetKernelObjectSecurity(
+                    token.as_raw_handle(),
+                    DACL_SECURITY_INFORMATION,
+                    descriptor_ptr,
+                )
+            } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
 
     fn quote(value: &str) -> String {
         let mut output = String::from("\"");
@@ -39,7 +71,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         output
     }
     let arguments: Vec<_> = std::env::args().skip(1).collect();
-    if arguments.len() != 3 {
+    let deny_caller_token = arguments.len() == 4 && arguments[3] == "--deny-token";
+    if arguments.len() != 3 && !deny_caller_token {
         return Err("expected runtime, probe script, and target PID".into());
     }
     let mut token: HANDLE = std::ptr::null_mut();
@@ -73,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let restricted = unsafe { OwnedHandle::from_raw_handle(restricted) };
     let executable: Vec<u16> = arguments[0].encode_utf16().chain([0]).collect();
-    let mut command: Vec<u16> = arguments
+    let mut command: Vec<u16> = arguments[..3]
         .iter()
         .map(|arg| quote(arg))
         .collect::<Vec<_>>()
@@ -83,6 +116,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     let mut startup: STARTUPINFOW = unsafe { zeroed() };
     startup.cb = size_of::<STARTUPINFOW>() as u32;
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    startup.hStdOutput = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+    startup.hStdError = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+    for stdio in [startup.hStdInput, startup.hStdOutput, startup.hStdError] {
+        if !stdio.is_null()
+            && stdio != INVALID_HANDLE_VALUE
+            && unsafe { SetHandleInformation(stdio, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+    }
     let mut process: PROCESS_INFORMATION = unsafe { zeroed() };
     if unsafe {
         CreateProcessAsUserW(
@@ -91,7 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             command.as_mut_ptr(),
             std::ptr::null(),
             std::ptr::null(),
-            0,
+            1,
             CREATE_NO_WINDOW,
             std::ptr::null(),
             std::ptr::null(),
@@ -104,7 +149,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let handle = unsafe { OwnedHandle::from_raw_handle(process.hProcess) };
     let _thread = unsafe { OwnedHandle::from_raw_handle(process.hThread) };
-    if unsafe { WaitForSingleObject(handle.as_raw_handle(), 30_000) } != WAIT_OBJECT_0 {
+    let started = std::time::Instant::now();
+    if deny_caller_token {
+        let directory = std::path::Path::new(&arguments[2]);
+        while !directory.join("ready").exists() {
+            if started.elapsed().as_millis() >= 30_000 {
+                unsafe {
+                    TerminateProcess(handle.as_raw_handle(), 1);
+                }
+                return Err("token denial probe did not initialize".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if let Err(error) = deny_token(handle.as_raw_handle()) {
+            unsafe {
+                TerminateProcess(handle.as_raw_handle(), 1);
+            }
+            return Err(error.into());
+        }
+        if let Err(error) = std::fs::write(directory.join("go"), b"go") {
+            unsafe {
+                TerminateProcess(handle.as_raw_handle(), 1);
+            }
+            return Err(error.into());
+        }
+    }
+    let remaining_ms = 30_000u128.saturating_sub(started.elapsed().as_millis()) as u32;
+    if unsafe { WaitForSingleObject(handle.as_raw_handle(), remaining_ms) } != WAIT_OBJECT_0 {
         unsafe {
             TerminateProcess(handle.as_raw_handle(), 1);
         }
