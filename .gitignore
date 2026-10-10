@@ -1,0 +1,13 @@
+dist/
+node_modules/
+target/
+native/*.node
+packages/*/*.node
+native/index.js
+native/index.d.ts
+coverage/
+release-artifacts*/
+artifacts/
+*.tgz
+*.tsbuildinfo
+.DS_Store
