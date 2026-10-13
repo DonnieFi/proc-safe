@@ -90,3 +90,14 @@ inaccessible and vanished rows. Each row uses one retained process object for va
 SID comparison, existing identity decoding, and optional command inspection. Native monotonic
 budget checks and a final wrapper check reject expired calls without a partial result. Windows
 environment selection uses ordinal case-insensitive comparison and preserves requested casing.
+
+The root [`getProcSafeNativeStatus()`](native-status.md) entry defers the status and
+loader modules until called. Its default reads the cached loader outcome; an
+explicit `{ probe: true }` attempts native loading. Reports contain only named
+reasons, allowlisted error codes, and package metadata, never loader paths.
+
+The [`windows-token` capability](windows-token.md) queries the current process token
+with `TokenIsAppContainer`, then `TokenAppContainerSid` only when contained. Rust
+validates returned lengths and the SID bounds before converting it to a string,
+and closes the token handle on every path. Queries are fresh on the calling
+thread; thread impersonation does not change which process token is inspected.

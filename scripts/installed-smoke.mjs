@@ -30,11 +30,17 @@ async function probe(version, target) {
     modules[subpath] = await import(name);
   }
   assert.equal(modules["."].ProcSafeError, modules["./errors"].ProcSafeError);
+  const native = await modules["."].getProcSafeNativeStatus({ probe: true });
+  assert.equal(native.reason, "loaded");
+  assert.equal(native.loaded, true);
+  assert.equal(native.packageName, target);
+  assert.equal(native.packageVersion, version);
   const expected = {
     "./identity": true,
     "./darwin": process.platform === "darwin",
     "./inspect": ["darwin", "win32"].includes(process.platform),
     "./windows-job": process.platform === "win32",
+    "./windows-token": process.platform === "win32",
     "./reaper": process.platform === "linux",
     "./diagnostics": process.platform === "linux",
     "./test-support": ["linux", "win32"].includes(process.platform),
@@ -73,6 +79,7 @@ async function probe(version, target) {
     assert.deepEqual(command.environment, {});
   }
   if (process.platform === "win32") {
+    assert.equal(modules["./windows-token"].readCurrentAppContainerSid(), null);
     // timeoutMs is required; leave all optional census settings at their defaults.
     const rows = modules["./inspect"].listProcesses({ timeoutMs: 5000 });
     assert.ok(rows.some(row => row.pid === process.pid && row.identity?.pid === process.pid && row.owner === "same"));

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add `windows-token` AppContainer SID inspection, with explicit errors when token state cannot be determined. Thanks @jonathanlindsay for the AppContainer detection idea.
+
+- Add async `getProcSafeNativeStatus()` for runtime health checks with optional probing, path-free load reasons, and actionable guidance.
+
 ## 0.2.0 - 2026-10-10
 
 - **Breaking:** `readProcessAncestry` now returns a self-first `{ chain, complete, stoppedBy }` snapshot or `null` for a provably gone start, instead of an array; unreadable parents preserve an incomplete chain, `throughPid` stops inclusively, and starting PIDs ≤1 throw `invalid-argument` with `details.reason: "init-process"` before any native read (`readProcessIdentity(1)` is unchanged).

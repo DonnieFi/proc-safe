@@ -63,6 +63,7 @@ Every capability is its own subpath, so you only load what you use.
 |---|---|---|
 | [`/identity`](docs/identity.md) | Who is this PID: parent, exact birth time, exited-but-retained state, ancestry | Darwin, Linux, Windows, FreeBSD |
 | [`/inspect`](docs/inspect.md) | What is this process running: executable, argv, cwd, selected env keys; full Windows census | Darwin, Windows |
+| [`/windows-token`](docs/windows-token.md) | Is this process in an AppContainer, and which SID identifies it | Windows |
 | [`/windows-job`](docs/windows-job.md) | Spawn into a Job atomically, own its output, tie your lifetime to another process | Windows |
 | [`/reaper`](docs/reaper.md) | Become a subreaper, observe child wait state without consuming it, reap one specific child | Linux |
 | [`/systemd`](docs/systemd.md) | Talk to systemd over sd-bus with authenticated peers and real deadlines | Linux |
@@ -208,6 +209,17 @@ supervisors — not for production code. [Diagnostics](docs/diagnostics.md) ·
 `PROC_SAFE_NATIVE=auto` (default) loads the native binding on first use. `off` never loads it —
 native-only operations then throw `helper-unavailable`. `require` makes a missing binding an
 immediate error. Imports never load native code in any mode. [Native architecture](docs/native.md).
+
+```ts
+import { getProcSafeNativeStatus } from "@openclaw/proc-safe";
+
+const native = await getProcSafeNativeStatus({ probe: true });
+console.log(native.loaded ? "Native helper active" : `Native helper: ${native.reason}`);
+if (native.guidance) console.log(native.guidance);
+```
+
+Without `probe: true`, this reads the cached state without loading the addon. Results omit
+paths and raw loader errors. See [native status](docs/native-status.md) for fields and recovery guidance.
 
 ## Platforms
 
