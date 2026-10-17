@@ -45,20 +45,37 @@ pub fn read_process_command(
     return windows::read(pid, &environment_keys);
 }
 
-#[cfg(windows)]
 #[napi(object)]
 pub struct ProcessSnapshot {
     pub pid: u32,
+    pub parent_pid: Option<u32>,
+    pub process_group_id: Option<u32>,
+    pub state: Option<String>,
     pub identity: Option<crate::identity::ProcessIdentity>,
     pub owner: String,
     pub command: Option<ProcessCommand>,
 }
 
-#[cfg(windows)]
 #[napi]
-pub fn list_processes(timeout_ms: f64, include_command: bool) -> Result<Vec<ProcessSnapshot>> {
-    windows::list(timeout_ms, include_command)
+pub fn list_processes(
+    timeout_ms: f64,
+    include_command: bool,
+    pids: Option<Vec<u32>>,
+) -> Result<Vec<ProcessSnapshot>> {
+    if pids.as_ref().is_some_and(|pids| {
+        pids.iter()
+            .any(|&pid| pid == 0 || (!cfg!(windows) && pid > i32::MAX as u32))
+    }) {
+        return Err(failure("invalid-argument", "invalid process ID"));
+    }
+    #[cfg(windows)]
+    return windows::list(timeout_ms, include_command, pids);
+    #[cfg(target_os = "macos")]
+    return darwin_census::list(timeout_ms, include_command, pids);
 }
+
+#[cfg(target_os = "macos")]
+mod darwin_census;
 
 #[cfg(target_os = "macos")]
 mod macos {
@@ -646,7 +663,11 @@ mod windows {
         }
     }
 
-    pub fn list(timeout_ms: f64, include_command: bool) -> Result<Vec<ProcessSnapshot>> {
+    pub fn list(
+        timeout_ms: f64,
+        include_command: bool,
+        selected: Option<Vec<u32>>,
+    ) -> Result<Vec<ProcessSnapshot>> {
         let budget = Budget {
             started: std::time::Instant::now(),
             timeout_ms,
@@ -686,12 +707,19 @@ mod windows {
                 "Windows process enumeration repeated a PID",
             ));
         }
+        if let Some(selected) = selected {
+            let selected: std::collections::HashSet<_> = selected.into_iter().collect();
+            pids.retain(|pid| selected.contains(pid));
+        }
         let self_owner = observed(token_owner(unsafe { GetCurrentProcess() }))?;
         let mut rows = Vec::with_capacity(pids.len());
         for pid in pids {
             budget.check()?;
             let mut row = ProcessSnapshot {
                 pid,
+                parent_pid: None,
+                process_group_id: None,
+                state: None,
                 identity: None,
                 owner: "unknown".into(),
                 command: None,
@@ -726,6 +754,7 @@ mod windows {
                 }
                 budget.check()?;
                 row.identity = observed(crate::identity::windows::read_handle(pid, handle.0))?;
+                row.parent_pid = row.identity.as_ref().map(|identity| identity.parent_pid);
                 budget.check()?;
                 if can_read_command {
                     row.command = observed(read_handle(pid, handle.0, &[]))?;

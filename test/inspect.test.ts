@@ -19,8 +19,19 @@ test.each([0, -1, NaN, Infinity])("census rejects invalid timeout %s", timeoutMs
   expect(() => listProcesses({ timeoutMs })).toThrow(expect.objectContaining({ code: "invalid-argument" }));
 });
 
-test("census is Windows-only", () => {
-  if (process.platform === "win32") {
+test.each([0, -1, 1.2, NaN, Infinity, 0x1_0000_0000])("census rejects invalid selected PID %s", pid => {
+  expect(() => listProcesses({ timeoutMs: 1000, pids: [pid] })).toThrow(expect.objectContaining({ code: "invalid-argument" }));
+});
+
+test("census rejects non-array and sparse PID selections", () => {
+  for (const pids of ["123", null, {}, new Array(1)]) {
+    // @ts-expect-error exercise JavaScript callers with malformed selections
+    expect(() => listProcesses({ timeoutMs: 1000, pids })).toThrow(expect.objectContaining({ code: "invalid-argument" }));
+  }
+});
+
+test("census supports Darwin and Windows", () => {
+  if (["darwin", "win32"].includes(process.platform)) {
     if (process.env.PROC_SAFE_NATIVE === "require") {
       expect(listProcesses({ timeoutMs: 1000 }).some(row => row.pid === process.pid)).toBe(true);
     } else {
@@ -29,4 +40,9 @@ test("census is Windows-only", () => {
   } else {
     expect(() => listProcesses({ timeoutMs: 1000 })).toThrow(expect.objectContaining({ code: "unsupported-platform" }));
   }
+});
+
+test.runIf(process.env.PROC_SAFE_NATIVE === "require" && process.platform === "darwin")("real Darwin census and Worker boundaries", () => {
+  const output = execFileSync(process.execPath, ["scripts/darwin-census-proof.mjs"], { encoding: "utf8", timeout: 10_000 });
+  expect(JSON.parse(output)).toMatchObject({ platform: "darwin", arch: process.arch, passed: 8 });
 });

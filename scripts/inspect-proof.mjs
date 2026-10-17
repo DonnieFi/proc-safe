@@ -42,10 +42,19 @@ function observe(pid, expected) {
     assert.ok(row);
     assert.equal(row.owner, "same");
     assert.deepEqual(row.identity, readProcessIdentity(pid));
+    assert.equal(row.parentPid, row.identity.parentPid);
+    assert.equal(row.processGroupId, undefined);
+    assert.equal(row.state, undefined);
     assert.deepEqual(row.command, readProcessCommand(pid));
     assert.deepEqual(row.command.environment, {});
     assert.equal(Object.isFrozen(row), true);
     assert.equal(Object.isFrozen(row.identity), true);
+    const selected = listProcesses({ timeoutMs: 5000, includeCommand: true, pids: [pid, pid] });
+    assert.equal(selected.length, 1);
+    assert.equal(selected[0].pid, pid);
+    assert.equal(selected[0].owner, "same");
+    assert.deepEqual(selected[0].identity, row.identity);
+    assert.deepEqual(selected[0].command, row.command);
   } else {
     assert.equal(command.cwd, undefined);
     assert.equal(command.commandLine, undefined);
@@ -96,6 +105,13 @@ function proveCensusOptions() {
   assert.ok(rows.every(row => row.command === undefined));
   // Idle has no user-mode process handle but remains in the complete PID list.
   assert.deepEqual(rows.find(row => row.pid === 0), { pid: 0, owner: "unknown" });
+  assert.deepEqual(listProcesses({ timeoutMs: 5000, pids: [] }), []);
+  assert.equal(readProcessIdentity(0xffff_ffff), null);
+  assert.deepEqual(listProcesses({ timeoutMs: 5000, pids: [0xffff_ffff] }), []);
+  const selected = listProcesses({ timeoutMs: 5000, pids: [process.pid, process.pid] });
+  assert.equal(selected.length, 1);
+  assert.equal(selected[0].pid, process.pid);
+  assert.equal(selected[0].command, undefined);
   assert.throws(() => listProcesses({ timeoutMs: Number.MIN_VALUE }), error => error.code === "timeout");
 }
 
@@ -213,6 +229,7 @@ if (!isMainThread) {
     assert.equal(execFileSync("/usr/sbin/sysctl", ["-in", "sysctl.proc_translated"], { encoding: "utf8" }).trim(), "1");
     assert.equal(isSupported(), false);
     assert.throws(() => readProcessCommand(process.pid), error => error.code === "unsupported-platform" && /Rosetta/.test(error.message));
+    assert.throws(() => listProcesses({ timeoutMs: 5000 }), error => error.code === "unsupported-platform" && /Rosetta/.test(error.message));
     const worker = new Worker(new URL("./inspect-rosetta-worker.mjs", import.meta.url));
     const closed = once(worker, "exit");
     assert.deepEqual(await once(worker, "message"), ["verified"]);

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add Darwin process census with independent parentage, process groups, ownership, and kernel state, including zombies and foreign-owner topology when birth identity is denied; Darwin and Windows censuses accept selected `pids`, and Windows rows report known parent PIDs.
+
 ## 0.3.0 - 2026-10-13
 
 - Add `windows-token` AppContainer SID inspection, with explicit errors when token state cannot be determined. Thanks @jonathanlindsay for the AppContainer detection idea.
