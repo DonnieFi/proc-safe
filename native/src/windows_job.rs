@@ -13,12 +13,17 @@ use windows_sys::Win32::{
     Foundation::*,
     Security::SECURITY_ATTRIBUTES,
     Storage::FileSystem::{
-        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        OPEN_EXISTING, ReadFile,
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_GENERIC_READ,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, PIPE_ACCESS_OUTBOUND, ReadFile,
+        WriteFile,
     },
     System::{
         JobObjects::*,
-        Pipes::{CreatePipe, PeekNamedPipe},
+        Pipes::{
+            ConnectNamedPipe, CreateNamedPipeW, CreatePipe, GetNamedPipeClientProcessId,
+            PIPE_NOWAIT, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+            PeekNamedPipe,
+        },
         Threading::*,
     },
 };
@@ -613,6 +618,7 @@ impl NativeJob {
         command_line: String,
         cwd: Option<String>,
         environment: Option<Vec<String>>,
+        pipe_stdin: bool,
     ) -> Result<NativeJobChild> {
         let executable = wide(&executable)?;
         let mut command = wide(&command_line)?;
@@ -643,21 +649,27 @@ impl NativeJob {
         };
         let (stdout, stdout_write) = pipe(&sa)?;
         let (stderr, stderr_write) = pipe(&sa)?;
-        let nul = wide("NUL")?;
-        let stdin = Handle::new(
-            unsafe {
-                CreateFileW(
-                    nul.as_ptr(),
-                    FILE_GENERIC_READ,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE,
-                    &sa,
-                    OPEN_EXISTING,
-                    FILE_ATTRIBUTE_NORMAL,
-                    null_mut(),
-                )
-            },
-            "CreateFileW(NUL)",
-        )?;
+        let (stdin, stdin_write) = if pipe_stdin {
+            let (reader, writer) = input_pipe(&sa)?;
+            (reader, Some(writer))
+        } else {
+            let nul = wide("NUL")?;
+            let reader = Handle::new(
+                unsafe {
+                    CreateFileW(
+                        nul.as_ptr(),
+                        FILE_GENERIC_READ,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        &sa,
+                        OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL,
+                        null_mut(),
+                    )
+                },
+                "CreateFileW(NUL)",
+            )?;
+            (reader, None)
+        };
         let mut size = 0;
         unsafe {
             InitializeProcThreadAttributeList(null_mut(), 2, 0, &mut size);
@@ -741,6 +753,7 @@ impl NativeJob {
         Ok(NativeJobChild {
             process,
             pid: info.dwProcessId,
+            stdin: stdin_write,
             stdout: Pipe {
                 handle: stdout,
                 ended: false,
@@ -765,6 +778,140 @@ fn pipe(sa: &SECURITY_ATTRIBUTES) -> Result<(Handle, Handle)> {
         return Err(win_error("SetHandleInformation"));
     }
     Ok((read, write))
+}
+
+// The anonymous output pipes are not a supported nonblocking-write transport.
+// Use an outbound byte-mode named pipe whose server writer is explicitly NOWAIT.
+fn input_pipe(sa: &SECURITY_ATTRIBUTES) -> Result<(Handle, InputPipe)> {
+    // System-preferred cryptographic RNG; available before the JOB_LIST platform floor.
+    #[link(name = "bcrypt")]
+    unsafe extern "system" {
+        fn BCryptGenRandom(algorithm: HANDLE, buffer: *mut u8, length: u32, flags: u32) -> i32;
+    }
+    const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 2;
+    let mut random = [0u8; 16];
+    if unsafe {
+        BCryptGenRandom(
+            null_mut(),
+            random.as_mut_ptr(),
+            random.len() as u32,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
+    } < 0
+    {
+        return Err(failure(
+            "operation-failed",
+            "cannot generate private input pipe name",
+        ));
+    }
+    let nonce = u128::from_le_bytes(random);
+    let name = wide(&format!(r"\\.\pipe\proc-safe-input-{nonce:032x}"))?;
+    // No SECURITY_ATTRIBUTES: the parent writer is never inheritable.
+    let writer = Handle::new(
+        unsafe {
+            CreateNamedPipeW(
+                name.as_ptr(),
+                PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                1,
+                65536,
+                0,
+                0,
+                null(),
+            )
+        },
+        "CreateNamedPipeW(stdin)",
+    )?;
+    let reader = Handle::new(
+        unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                FILE_GENERIC_READ,
+                0,
+                sa,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                null_mut(),
+            )
+        },
+        "CreateFileW(stdin)",
+    )?;
+    // The client normally connects between CreateNamedPipeW and this call.
+    if unsafe { ConnectNamedPipe(writer.get()?, null_mut()) } == 0
+        && unsafe { GetLastError() } != ERROR_PIPE_CONNECTED
+    {
+        return Err(win_error("ConnectNamedPipe(stdin)"));
+    }
+    // Default pipe ACLs can admit local readers. Never expose the writer until the
+    // connected client is proven to be our own creating process. A collision or
+    // interception fails closed, before CreateProcessW or any input write.
+    let mut client_pid = 0;
+    if unsafe { GetNamedPipeClientProcessId(writer.get()?, &mut client_pid) } == 0 {
+        return Err(win_error("GetNamedPipeClientProcessId(stdin)"));
+    }
+    if client_pid != unsafe { GetCurrentProcessId() } {
+        return Err(failure(
+            "operation-failed",
+            "private input pipe peer mismatch",
+        ));
+    }
+    // The client handle retains its default blocking read mode, independently of
+    // the server's NOWAIT mode. Only this reader joins the child handle allowlist.
+    Ok((
+        reader,
+        InputPipe {
+            handle: writer,
+            broken: false,
+        },
+    ))
+}
+
+struct InputPipe {
+    handle: Handle,
+    broken: bool,
+}
+impl InputPipe {
+    fn write(&mut self, bytes: &[u8]) -> Result<Option<u32>> {
+        if bytes.is_empty() || bytes.len() > u32::MAX as usize {
+            return Err(failure(
+                "invalid-argument",
+                "stdin bytes must have positive unsigned 32-bit length",
+            ));
+        }
+        if self.broken {
+            return Ok(None);
+        }
+        let mut written = 0;
+        // Byte-mode PIPE_NOWAIT writes accept the available prefix (possibly zero)
+        // without waiting for a reader. No background request or retained JS buffer.
+        // https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-type-read-and-wait-modes
+        if unsafe {
+            WriteFile(
+                self.handle.get()?,
+                bytes.as_ptr(),
+                bytes.len() as u32,
+                &mut written,
+                null_mut(),
+            )
+        } == 0
+        {
+            let code = unsafe { GetLastError() };
+            if matches!(
+                code,
+                ERROR_BROKEN_PIPE | ERROR_NO_DATA | ERROR_PIPE_NOT_CONNECTED
+            ) {
+                self.broken = true;
+                self.handle.close()?;
+                return Ok(None);
+            }
+            // Preserve this error before cleanup or any further Windows call.
+            return Err(win_error("WriteFile(stdin)"));
+        }
+        if written as usize > bytes.len() {
+            return Err(failure("incomplete", "invalid input pipe write length"));
+        }
+        Ok(Some(written))
+    }
 }
 
 struct Pipe {
@@ -828,6 +975,7 @@ impl Pipe {
 pub struct NativeJobChild {
     process: Handle,
     pid: u32,
+    stdin: Option<InputPipe>,
     stdout: Pipe,
     stderr: Pipe,
 }
@@ -849,6 +997,22 @@ impl NativeJobChild {
         self.stderr.read(max_bytes)
     }
     #[napi]
+    pub fn write_stdin(&mut self, bytes: Buffer) -> Result<Option<u32>> {
+        self.process.get()?;
+        self.stdin
+            .as_mut()
+            .ok_or_else(|| failure("invalid-argument", "stdin is not open for writing"))?
+            .write(&bytes)
+    }
+    #[napi]
+    pub fn close_stdin(&mut self) -> Result<()> {
+        self.process.get()?;
+        if let Some(mut input) = self.stdin.take() {
+            input.handle.close()?;
+        }
+        Ok(())
+    }
+    #[napi]
     pub fn exit_code(&self) -> Result<Option<u32>> {
         let handle = self.process.get()?;
         match unsafe { WaitForSingleObject(handle, 0) } {
@@ -865,10 +1029,14 @@ impl NativeJobChild {
     }
     #[napi]
     pub fn close(&mut self) -> Result<()> {
+        let stdin = self
+            .stdin
+            .take()
+            .map_or(Ok(()), |mut input| input.handle.close());
         let stdout = self.stdout.handle.close();
         let stderr = self.stderr.handle.close();
         let process = self.process.close();
-        stdout.and(stderr).and(process)
+        stdin.and(stdout).and(stderr).and(process)
     }
 }
 
