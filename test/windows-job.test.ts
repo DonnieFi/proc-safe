@@ -31,5 +31,5 @@ test.runIf(process.platform === "win32" && process.env.PROC_SAFE_NATIVE === "req
 
 test.runIf(process.platform === "win32" && process.env.PROC_SAFE_NATIVE === "require")("real Windows private input on main thread and Worker", () => {
   const output = execFileSync(process.execPath, ["scripts/windows-job-proof.mjs", "inputs"], { encoding: "utf8", timeout: 60_000 });
-  expect(JSON.parse(output)).toEqual({ inputs: 2, inputLifetimes: 2 });
+  expect(JSON.parse(output)).toEqual({ inputs: 2, inputLifetimes: 2, doctorOrder: 4 });
 }, 65_000);

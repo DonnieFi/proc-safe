@@ -114,6 +114,7 @@ export class WindowsJobChild implements Disposable {
   get pid(): number { return call(() => nativeOwner(children, this).pid); }
   readStdout(maxBytes: number): Buffer | null { uint(maxBytes, "maxBytes", 1); return call(() => nativeOwner(children, this).readStdout(maxBytes)); }
   readStderr(maxBytes: number): Buffer | null { uint(maxBytes, "maxBytes", 1); return call(() => nativeOwner(children, this).readStderr(maxBytes)); }
+  /** A positive result has already released that prefix; acceptance is not consumption. */
   writeStdin(bytes: Buffer): number | null {
     if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > 0xffffffff) {
       throw new ProcSafeError("invalid-argument", "stdin bytes must be a nonempty Buffer with unsigned 32-bit length");

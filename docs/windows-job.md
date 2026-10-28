@@ -135,6 +135,10 @@ if (accepted === null) {
 prefix bytes accepted immediately, including a partial prefix or zero when full. It never
 waits for the child to read. It retains no buffer, queues no suffix, and performs no retry.
 Accepted bytes are copied into the kernel stream; this is not proof of child consumption.
+Any positive result has **already released that prefix**, even if a later write returns
+zero, disconnects, or throws. An incomplete grant must not be described as withheld:
+track release from the first positive acceptance, independently of complete delivery.
+Even complete kernel acceptance does not prove that the child consumed the grant.
 Callers own scheduling, concurrent output drainage, byte/elapsed-time budgets, and deciding
 whether to send more. Do not call it with an empty remainder.
 
@@ -197,6 +201,11 @@ exit code 259, named jobs, cancellation, detached descendants, output EOF before
 nested jobs, private-input gating/backpressure/EOF, root exit with an inherited input reader,
 input-owner closure and death, Worker cleanup, process death, retained process lifetime, remote-handle rollback,
 and owner death during handoff. An independent Rust fixture supplies descendants and owners.
+The private-input proof also tests the Doctor nesting order: a parent retains an outer
+kill-on-close Job and atomically admits a child before that child creates and retains a
+distinct inner kill-on-close Job, on main and in a real Worker, before reading input.
+It observes live outer descendant accounting before zero, both when inner kill-on-close
+terminates descendants at child exit and when the parent terminates the outer Job.
 Each thread also tests wrong-mode refusals and an observer of a process whose DACL denies
 DUP_HANDLE. For the denial proof, the separate test addon impersonates the calling thread,
 disables SeDebugPrivilege, invokes the same pinned-open path, and always reverts before

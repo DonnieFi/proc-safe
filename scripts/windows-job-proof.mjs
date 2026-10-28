@@ -294,6 +294,84 @@ async function inputLifetimes(worker) {
   }
 }
 
+// Unlike nested-input, this host is ALREADY admitted into its parent's outer
+// Job before it creates the fresh inner Job. No outer handle enters this host.
+async function doctorOrderChild() {
+  const retain = () => {
+    const inner = WindowsJob.create(); // Keep the default kill-on-close behavior.
+    retainCurrentProcessJobUntilExit(inner);
+    inner.close(); // Consumed owner: must not close the retained native handle.
+    assert.equal(isCurrentProcessInJob(), true);
+  };
+  if (!isMainThread) { retain(); return; }
+  if (process.argv[3] === "worker") {
+    const worker = new Worker(new URL(import.meta.url), { argv: ["doctor-retain"] });
+    const [code] = await once(worker, "exit");
+    assert.equal(code, 0);
+  } else { retain(); }
+  // Both retention and actual Worker exit precede even the first stdin read.
+  console.log("inner-retained");
+  const chunks = [];
+  for await (const bytes of process.stdin) chunks.push(bytes);
+  const input = Buffer.concat(chunks);
+  assert.equal(input.length, 14);
+  assert.equal(inputHash(input), inputHash(Buffer.from("doctor-private")));
+  const tree = spawn(fixture, ["tree", process.argv[4]], { stdio: ["ignore", "pipe", "inherit"] });
+  const exited = once(tree, "exit");
+  let output = "";
+  tree.stdout.on("data", bytes => output += bytes);
+  const [code] = await exited;
+  assert.equal(code, 259);
+  await until(() => existsSync(process.argv[4]));
+  const descendant = Number(readFileSync(process.argv[4], "utf8"));
+  assert.equal(Number(output.trim()), descendant);
+  console.log(`input-accepted descendant ${descendant}`);
+  await until(() => existsSync(process.argv[5]));
+  // Exit closes the retained inner Job and must kill its still-live descendant.
+}
+
+async function doctorOrder(worker, terminate) {
+  const dir = mkdtempSync(join(tmpdir(), "proc-safe-doctor-order-"));
+  const outer = WindowsJob.create(); // Parent keeps sole ownership throughout.
+  let child, pin, descendant;
+  try {
+    const finish = join(dir, "finish"), ready = join(dir, "descendant");
+    child = outer.spawn({ executable: process.execPath,
+      commandLine: [process.execPath, entry, "doctor-order", worker ? "worker" : "main", ready, finish].map(quote).join(" "), stdin: "pipe" });
+    pin = PinnedProcess.open(child.pid);
+    assert.ok(pin);
+    const output = collect(child);
+    await until(() => { output.poll(); return output.out() === "inner-retained\n"; });
+    assert.equal(pin.identity.exited, false);
+    assert.ok(outer.processIds().includes(child.pid));
+    assert.ok(outer.accounting().activeProcesses > 0);
+    const verified = PinnedProcess.open(child.pid, { expect: { startTimeMicros: pin.identity.startTimeMicros } });
+    verified.close();
+    const bytes = Buffer.from("doctor-private");
+    assert.equal(child.writeStdin(bytes), bytes.length);
+    child.closeStdin();
+    await until(() => { output.poll(); return /input-accepted descendant \d+\n/.test(output.out()); });
+    const pid = Number(/input-accepted descendant (\d+)\n/.exec(output.out())[1]);
+    descendant = PinnedProcess.open(pid);
+    assert.ok(descendant);
+    assert.equal(descendant.identity.exited, false);
+    assert.ok(outer.processIds().includes(pid));
+    assert.ok(outer.accounting().activeProcesses >= 2, "outer must observe both live nested members before zero");
+    if (terminate) outer.terminate(39);
+    else writeFileSync(finish, "exit");
+    await until(() => pin.identity.exited && descendant.identity.exited);
+    await until(() => outer.accounting().activeProcesses === 0);
+    const result = await drain(child);
+    assert.equal(result.code, terminate ? 39 : 0, result.err.toString());
+  } finally {
+    // Only the parent's task-owned outer Job is terminated, including on failure.
+    try { outer.terminate(40); } finally {
+      child?.close(); pin?.close(); descendant?.close(); outer.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+}
+
 async function operations() {
   assert.equal(isSupported(), true);
   const self = PinnedProcess.open(process.pid);
@@ -579,7 +657,9 @@ async function lifetimes(worker) {
 }
 
 const mode = process.argv[2];
-if (isMainThread && process.argv[3] === "worker") {
+if (mode === "doctor-order" || mode === "doctor-retain") {
+  await doctorOrderChild();
+} else if (isMainThread && process.argv[3] === "worker") {
   const worker = new Worker(new URL(import.meta.url), { argv: process.argv.slice(2) });
   worker.on("error", e => { throw e; });
   if (mode === "parent" || mode === "input-parent") process.stdin.once("data", () => worker.postMessage("release"));
@@ -598,7 +678,8 @@ if (isMainThread && process.argv[3] === "worker") {
     const exited = once(worker, "exit");
     await once(worker, "message"); await exited;
     await inputLifetimes(false); await inputLifetimes(true);
-    console.log(JSON.stringify({ inputs: 2, inputLifetimes: 2 }));
+    for (const worker of [false, true]) for (const terminate of [false, true]) await doctorOrder(worker, terminate);
+    console.log(JSON.stringify({ inputs: 2, inputLifetimes: 2, doctorOrder: 4 }));
   } else { parentPort.postMessage("passed"); }
 } else if (mode === "environments") {
   await environments();
