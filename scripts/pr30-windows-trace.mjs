@@ -271,11 +271,17 @@ async function inputs() {
 
     // Failed launches own and close both private endpoints before propagating.
     const count = () => Number(execFileSync(fixture, ["handle-count", String(process.pid)], { encoding: "utf8" }).trim());
+    // ARM64 Windows retains process-wide handles on the first missing-executable
+    // CreateProcessW failure, including with NUL stdin and in an independent
+    // Win32 control. Initialize that existing path before measuring pipe cleanup.
+    assert.throws(() => job.spawn({ executable: "C:\\missing.exe", commandLine: "missing" }), e => e.code === "operation-failed");
     const before = count();
     for (let i = 0; i < 4; i++) {
       assert.throws(() => job.spawn({ executable: "C:\\missing.exe", commandLine: "missing", stdin: "pipe" }), e => e.code === "operation-failed" && !e.message.includes("proc-safe-input-"));
     }
-    assert.equal(count(), before);
+    const after = count();
+    assert.equal(after, before);
+    trace("failed-input-cleanup", { before, after, attempts: 4, initializedWith: "NUL-stdin failure" });
   } finally { job.close(); rmSync(dir, { recursive: true, force: true }); }
 }
 async function inputLifetimes(worker) {
