@@ -1,0 +1,54 @@
+name: PR30 native Windows ARM64 proof
+on:
+  push:
+    branches: [proof/windows-arm64-pr30]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  proof:
+    name: Windows ARM64 Node ${{ matrix.node }} and Bun
+    runs-on: windows-11-arm
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.23.4', '24.22.1']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-node-pnpm
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Verify candidate source and real ARM64 runtime
+        shell: bash
+        run: |
+          git diff --exit-code 3ea994815c8cc035a5403da1cf16a9eb823cc5d0 -- src native test packages package.json pnpm-lock.yaml Cargo.toml Cargo.lock
+          node -e "if(process.platform !== 'win32' || process.arch !== 'arm64') throw Error('not native Windows ARM64'); console.log(process.version, process.platform, process.arch)"
+          rustc -Vv
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm native:build
+      - name: Build independent 32-bit observation fixture
+        run: |
+          rustup target add i686-pc-windows-msvc
+          rustc --target i686-pc-windows-msvc test/fixtures/inspect-child.rs -o target/inspect-child-x86.exe
+      - name: Native Node contracts
+        env:
+          PROC_SAFE_NATIVE: require
+        run: pnpm test --fileParallelism=false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.4
+      - name: Verify native Bun architecture
+        run: bun -e "if(process.arch !== 'arm64') throw Error('not native ARM64'); console.log(process.versions)"
+      - name: Native Bun contracts
+        env:
+          PROC_SAFE_NATIVE: require
+        run: pnpm test:bun --fileParallelism=false
+      - run: pnpm package:smoke
+      - name: Build and test separate fault addon
+        run: node scripts/check-windows-job-fault.mjs
+      - name: Installed package traces and separate adversarial traces
+        run: npm exec -- node scripts/pr30-installed-proof.mjs
