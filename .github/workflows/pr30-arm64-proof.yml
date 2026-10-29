@@ -34,13 +34,19 @@ jobs:
         run: |
           rustup target add i686-pc-windows-msvc
           rustc --target i686-pc-windows-msvc test/fixtures/inspect-child.rs -o target/inspect-child-x86.exe
+      - name: Build independent handle-type and raw Win32 control
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -property installationPath
+          $dev = Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
+          & cmd /d /s /c "`"$dev`" -no_logo -arch=arm64 -host_arch=arm64 && cl /nologo /EHsc /W4 /std:c++17 scripts\pr30-handle-native.cpp /Fe:target\pr30-handle-native.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Diagnose handle types and independent Win32 control
+        run: node scripts/pr30-handle-diagnostic.mjs
       - name: Native Node contracts
         env:
           PROC_SAFE_NATIVE: require
         run: pnpm test --fileParallelism=false
-      - name: Diagnose handle accounting without changing failed assertions
-        if: failure()
-        run: node scripts/pr30-handle-diagnostic.mjs
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: 1.4.4

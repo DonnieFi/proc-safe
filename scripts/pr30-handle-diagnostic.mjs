@@ -1,18 +1,22 @@
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { WindowsJob } from '../dist/windows-job.js';
-const fixture = resolve('target/aarch64-pc-windows-msvc/release/proc-safe-job-fixture.exe');
-const count = () => Number(execFileSync(fixture, ['handle-count', String(process.pid)], { encoding: 'utf8' }).trim());
+const helper = resolve('target/pr30-handle-native.exe');
+const snapshot = () => JSON.parse(execFileSync(helper, ['snapshot', String(process.pid)], { encoding: 'utf8' }));
 const job = WindowsJob.create();
-console.log(JSON.stringify({ phase: 'count-only-controls', counts: Array.from({ length: 8 }, count) }));
+// Hold all observations until measurement ends; console startup is not a measured operation.
+const controls = Array.from({ length: 4 }, snapshot);
 const rows = [];
-for (let i = 0; i < 12; i++) {
- const before = count();
- let code;
- try { job.spawn({ executable: 'C:\\missing.exe', commandLine: 'missing', stdin: 'pipe' }); throw Error('unexpected launch success'); }
- catch (e) { if (e.code !== 'operation-failed') throw e; code = e.code; }
- rows.push({ before, after: count(), code });
+for (const stdin of ['null', 'pipe']) {
+ for (let i = 0; i < 6; i++) {
+  const before = snapshot();
+  let code;
+  try { job.spawn({ executable: 'C:\\missing.exe', commandLine: 'missing', stdin }); throw Error('unexpected launch success'); }
+  catch (e) { if (e.code !== 'operation-failed') throw e; code = e.code; }
+  rows.push({ stdin, attempt: i, before, after: snapshot(), code });
+ }
 }
-console.log(JSON.stringify({ phase: 'failed-launches', rows }));
 job.close();
-console.log(JSON.stringify({ phase: 'job-closed', counts: Array.from({ length: 4 }, count) }));
+const closed = snapshot();
+console.log(JSON.stringify({ controlSnapshots: controls, failedLaunches: rows, jobClosed: closed }));
+process.stdout.write(execFileSync(helper, [], { encoding: 'utf8' }));
