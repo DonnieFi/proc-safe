@@ -31,6 +31,7 @@ use windows_sys::Win32::{
 #[cfg(feature = "fault-injection")]
 thread_local! {
     static FAIL_ASSIGNMENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static INPUT_INTERCEPT: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Only the separate fault-proof addon exports this thread-local, one-shot fault.
@@ -38,6 +39,64 @@ thread_local! {
 #[napi]
 pub fn fail_next_windows_job_assignment() {
     FAIL_ASSIGNMENT.set(true);
+}
+
+/// Configure a one-shot competing client in the separate fault-proof addon only.
+#[cfg(feature = "fault-injection")]
+#[napi]
+pub fn intercept_next_windows_job_input(executable: String, result: String) -> Result<()> {
+    INPUT_INTERCEPT.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        if pending.is_some() {
+            return Err(failure(
+                "invalid-argument",
+                "input interceptor already configured",
+            ));
+        }
+        *pending = Some((executable, result));
+        Ok(())
+    })
+}
+
+#[cfg(feature = "fault-injection")]
+fn test_input_interceptor(name: &str) -> Result<Option<std::process::Child>> {
+    use std::io::BufRead;
+    use std::process::{Command, Stdio};
+    let Some((executable, result)) = INPUT_INTERCEPT.take() else {
+        return Ok(None);
+    };
+    let mut command = Command::new(executable);
+    command.args(["competing-stdin", name, &result]).env_clear();
+    if let Some(system_root) = std::env::var_os("SystemRoot") {
+        command.env("SystemRoot", system_root);
+    }
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| failure("operation-failed", "cannot start test input competitor"))?;
+    let mut line = String::new();
+    let read = child
+        .stdout
+        .take()
+        .map(|output| std::io::BufReader::new(output).read_line(&mut line));
+    if !matches!(read, Some(Ok(_))) || line.trim_end() != "connected" {
+        let _ = child.kill();
+        let _ = child.wait();
+        let code = line
+            .trim_end()
+            .strip_prefix("connection-failed ")
+            .and_then(|value| value.parse::<u32>().ok());
+        return Err(failure(
+            "operation-failed",
+            match code {
+                Some(code) => format!("test input competitor connection failed (Win32 {code})"),
+                None => "test input competitor did not report a connection".into(),
+            },
+        ));
+    }
+    Ok(Some(child))
 }
 
 fn win_error(operation: &str) -> napi::Error {
@@ -780,6 +839,8 @@ fn pipe(sa: &SECURITY_ATTRIBUTES) -> Result<(Handle, Handle)> {
     Ok((read, write))
 }
 
+const INPUT_PIPE_WRITE_LIMIT: u32 = 65536;
+
 // The anonymous output pipes are not a supported nonblocking-write transport.
 // Use an outbound byte-mode named pipe whose server writer is explicitly NOWAIT.
 fn input_pipe(sa: &SECURITY_ATTRIBUTES) -> Result<(Handle, InputPipe)> {
@@ -805,7 +866,8 @@ fn input_pipe(sa: &SECURITY_ATTRIBUTES) -> Result<(Handle, InputPipe)> {
         ));
     }
     let nonce = u128::from_le_bytes(random);
-    let name = wide(&format!(r"\\.\pipe\proc-safe-input-{nonce:032x}"))?;
+    let pipe_name = format!(r"\\.\pipe\proc-safe-input-{nonce:032x}");
+    let name = wide(&pipe_name)?;
     // No SECURITY_ATTRIBUTES: the parent writer is never inheritable.
     let writer = Handle::new(
         unsafe {
@@ -814,7 +876,7 @@ fn input_pipe(sa: &SECURITY_ATTRIBUTES) -> Result<(Handle, InputPipe)> {
                 PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 1,
-                65536,
+                INPUT_PIPE_WRITE_LIMIT,
                 0,
                 0,
                 null(),
@@ -822,6 +884,8 @@ fn input_pipe(sa: &SECURITY_ATTRIBUTES) -> Result<(Handle, InputPipe)> {
         },
         "CreateNamedPipeW(stdin)",
     )?;
+    #[cfg(feature = "fault-injection")]
+    let _competitor = test_input_interceptor(&pipe_name)?;
     let reader = Handle::new(
         unsafe {
             CreateFileW(
@@ -882,14 +946,16 @@ impl InputPipe {
             return Ok(None);
         }
         let mut written = 0;
-        // Byte-mode PIPE_NOWAIT writes accept the available prefix (possibly zero)
-        // without waiting for a reader. No background request or retained JS buffer.
+        // One bounded kernel attempt prevents a large request from returning zero
+        // indefinitely on Windows even while the pipe is empty. No suffix is queued
+        // or retried; the caller observes the accepted prefix, including zero.
         // https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-type-read-and-wait-modes
+        let requested = bytes.len().min(INPUT_PIPE_WRITE_LIMIT as usize) as u32;
         if unsafe {
             WriteFile(
                 self.handle.get()?,
                 bytes.as_ptr(),
-                bytes.len() as u32,
+                requested,
                 &mut written,
                 null_mut(),
             )
@@ -907,7 +973,7 @@ impl InputPipe {
             // Preserve this error before cleanup or any further Windows call.
             return Err(win_error("WriteFile(stdin)"));
         }
-        if written as usize > bytes.len() {
+        if written > requested {
             return Err(failure("incomplete", "invalid input pipe write length"));
         }
         Ok(Some(written))

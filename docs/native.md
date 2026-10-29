@@ -13,8 +13,8 @@ Windows jobs live in `windows_job.rs`. Native owners close job, process, and pip
 JavaScript never receives numeric handles. Child creation supplies both JOB_LIST and
 HANDLE_LIST to CreateProcessW, so admission precedes execution and only the selected stdin
 reader (NUL by default) and the two output writers are inherited. Opt-in private input uses
-a local byte-mode named pipe: a non-inheritable NOWAIT server writer accepts an immediate
-prefix or reports backpressure, while the child reader keeps blocking read semantics.
+a local byte-mode named pipe: a non-inheritable NOWAIT server writer makes one bounded
+write attempt and reports its accepted prefix, while the child reader keeps blocking read semantics.
 The system cryptographic RNG supplies an unpredictable name; first-instance protection,
 remote-client rejection, and creator-PID validation precede exposing the writer. No background
 I/O owns a borrowed JavaScript buffer. The native child owner closes the writer on explicit

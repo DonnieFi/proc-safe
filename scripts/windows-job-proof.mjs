@@ -13,7 +13,7 @@ import { WindowsJob, PinnedProcess, bindCurrentProcessLifetimeTo, retainCurrentP
 
 const fixture = resolve(`target/${process.arch === "arm64" ? "aarch64" : "x86_64"}-pc-windows-msvc/release/proc-safe-job-fixture.exe`);
 const entry = fileURLToPath(import.meta.url);
-const { injectAssignmentFailure, inspectPinAccess, openPinWithoutDebug } = installPinTestBinding();
+const { injectAssignmentFailure, inspectPinAccess, openPinWithoutDebug, interceptNextInput } = installPinTestBinding();
 const pause = () => new Promise(r => setTimeout(r, 5));
 async function until(fn) {
   const deadline = performance.now() + 8000;
@@ -170,10 +170,10 @@ async function inputs() {
       const bytes = Buffer.from(Array.from({ length: 1024 * 1024 }, (_, i) => i % 251));
       const hash = inputHash(bytes);
       let offset = 0;
-      // Fixture cannot read until gate release: this deterministically tests a
-      // positive partial prefix, then a full-pipe zero without a timing threshold.
+      // Fixture cannot read until gate release: a large request must still make
+      // a positive bounded attempt, then eventually observe zero without waiting.
       const first = child.writeStdin(bytes);
-      assert.ok(first > 0 && first < bytes.length);
+      assert.ok(first > 0 && first <= 65536 && first < bytes.length);
       offset += first;
       while (offset < bytes.length) {
         const n = child.writeStdin(bytes.subarray(offset));
@@ -317,11 +317,12 @@ async function doctorOrderChild() {
   assert.equal(input.length, 14);
   assert.equal(inputHash(input), inputHash(Buffer.from("doctor-private")));
   const tree = spawn(fixture, ["tree", process.argv[4]], { stdio: ["ignore", "pipe", "inherit"] });
-  const exited = once(tree, "exit");
+  const closed = once(tree, "close");
   let output = "";
   tree.stdout.on("data", bytes => output += bytes);
-  const [code] = await exited;
-  assert.equal(code, 259);
+  const [code] = await closed;
+  // Bun 1.4.4 exposes the low byte of this process exit status on Windows.
+  assert.equal(code, process.versions.bun ? 259 & 0xff : 259);
   await until(() => existsSync(process.argv[4]));
   const descendant = Number(readFileSync(process.argv[4], "utf8"));
   assert.equal(Number(output.trim()), descendant);
@@ -596,6 +597,24 @@ async function faultProof(worker) {
   } finally { child.kill(); await exit; }
 }
 
+// The test addon pauses only the pipe setup to let an independent local client
+// connect first. The ordinary native launch and verification checks remain in place.
+async function competingInput() {
+  const dir = mkdtempSync(join(tmpdir(), "proc-safe-competitor-"));
+  const outcome = join(dir, "outcome");
+  const launched = join(dir, "launched");
+  const job = WindowsJob.create();
+  try {
+    interceptNextInput(fixture, outcome);
+    assert.throws(() => job.spawn({ executable: fixture, commandLine: [fixture, "mark-launch", launched].map(quote).join(" "), stdin: "pipe" }),
+      e => e.code === "operation-failed" && e.message.includes("Win32 231") && !e.message.includes("proc-safe-input-"));
+    const observed = await until(() => existsSync(outcome) && readFileSync(outcome, "utf8"));
+    assert.equal(observed, "no-bytes");
+    assert.equal(existsSync(launched), false);
+    assert.equal(job.accounting().activeProcesses, 0);
+  } finally { job.close(); rmSync(dir, { recursive: true, force: true }); }
+}
+
 async function lifetimes(worker) {
   const nested = host("nested", worker);
   assert.equal(await nested.next(), "nested");
@@ -696,7 +715,14 @@ if (mode === "doctor-order" || mode === "doctor-retain") {
   const exited = once(worker, "exit");
   await once(worker, "message"); await exited;
   await faultProof(false); await faultProof(true);
-  console.log(JSON.stringify({ faultProof: 2, accessProof: 2 }));
+  await competingInput();
+  const competitorWorker = new Worker(new URL(import.meta.url), { argv: ["competing-proof"] });
+  const competitorExit = once(competitorWorker, "exit");
+  await once(competitorWorker, "message"); await competitorExit;
+  console.log(JSON.stringify({ faultProof: 2, accessProof: 2, competingInput: 2 }));
+} else if (mode === "competing-proof") {
+  await competingInput();
+  parentPort.postMessage("passed");
 } else if (mode === "access-proof") {
   await accessModes();
   parentPort.postMessage("passed");

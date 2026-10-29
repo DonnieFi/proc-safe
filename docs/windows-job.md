@@ -126,14 +126,16 @@ const accepted = child.writeStdin(remaining);
 if (accepted === null) {
   // The reader has disconnected; input was not fully delivered.
 } else {
-  remaining = remaining.subarray(accepted); // zero means backpressure; yield before trying again
+  remaining = remaining.subarray(accepted); // zero means no bytes accepted; yield before trying again
   if (remaining.length === 0) child.closeStdin();
 }
 ```
 
 `writeStdin` requires a nonempty `Buffer` of at most 2^32−1 bytes. It returns the number of
-prefix bytes accepted immediately, including a partial prefix or zero when full. It never
-waits for the child to read. It retains no buffer, queues no suffix, and performs no retry.
+prefix bytes accepted immediately, including a partial prefix or zero when no bytes are accepted.
+Zero does not prove that the pipe is full. Each call makes one kernel write attempt of at most
+64 KiB; larger buffers can produce a positive partial result even when the pipe has capacity.
+It never waits for the child to read. It retains no buffer, queues no suffix, and performs no retry.
 Accepted bytes are copied into the kernel stream; this is not proof of child consumption.
 Any positive result has **already released that prefix**, even if a later write returns
 zero, disconnects, or throws. An incomplete grant must not be described as withheld:
@@ -206,6 +208,8 @@ kill-on-close Job and atomically admits a child before that child creates and re
 distinct inner kill-on-close Job, on main and in a real Worker, before reading input.
 It observes live outer descendant accounting before zero, both when inner kill-on-close
 terminates descendants at child exit and when the parent terminates the outer Job.
+Closing the parent writer while the child is still alive must let that child observe EOF;
+an inherited writer would keep the pipe open and prevent this observation.
 Each thread also tests wrong-mode refusals and an observer of a process whose DACL denies
 DUP_HANDLE. For the denial proof, the separate test addon impersonates the calling thread,
 disables SeDebugPrivilege, invokes the same pinned-open path, and always reverts before
@@ -214,5 +218,9 @@ ObjectBasicInformation and verifies all three exact masks on the main thread and
 
 The `fault-injection` Cargo feature is off by default. Windows CI builds its addon in a
 separate target directory and tests post-duplication rollback on Node and Bun, both on the
-main thread and in a Worker. The production build and package collector reject artifacts
-containing the test-only fault export; platform packages never receive this addon.
+main thread and in a Worker. A test-only synchronization hook also lets an independent
+local client connect before the owner's own open. The test checks that the owner fails,
+the intended child is not launched, and the competitor receives no bytes. This exercises
+the busy-pipe failure path using the separate test addon; it does not force the distinct
+client-PID-mismatch branch. The production build and package collector reject artifacts
+containing test-only exports; platform packages never receive this addon.

@@ -15,6 +15,62 @@ fn main() {
     };
     let args: Vec<String> = std::env::args().collect();
     match args[1].as_str() {
+        "competing-stdin" => {
+            use std::{os::windows::ffi::OsStrExt, ptr::null_mut};
+            use windows_sys::Win32::Storage::FileSystem::{
+                CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, OPEN_EXISTING, ReadFile,
+            };
+            let name: Vec<u16> = std::ffi::OsStr::new(&args[2])
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
+            let pipe = unsafe {
+                CreateFileW(
+                    name.as_ptr(),
+                    FILE_GENERIC_READ,
+                    0,
+                    null(),
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    null_mut(),
+                )
+            };
+            if pipe.is_null() || pipe == INVALID_HANDLE_VALUE {
+                println!("connection-failed {}", unsafe { GetLastError() });
+                io::stdout().flush().unwrap();
+                std::process::exit(1);
+            }
+            println!("connected");
+            io::stdout().flush().unwrap();
+            let mut byte = 0u8;
+            let mut count = 0u32;
+            let ok = unsafe {
+                ReadFile(
+                    pipe,
+                    (&mut byte as *mut u8).cast(),
+                    1,
+                    &mut count,
+                    null_mut(),
+                )
+            };
+            let error = if ok == 0 {
+                unsafe { GetLastError() }
+            } else {
+                0
+            };
+            unsafe { CloseHandle(pipe) };
+            let outcome = if count == 0
+                && (ok != 0 || error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED)
+            {
+                "no-bytes"
+            } else {
+                "unexpected-read"
+            };
+            std::fs::write(&args[3], outcome).unwrap();
+        }
+        "mark-launch" => {
+            std::fs::write(&args[2], "launched").unwrap();
+        }
         "stdin" | "stdin-eof" => {
             let mut inside = 0;
             assert_ne!(
