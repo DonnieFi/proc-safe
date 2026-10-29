@@ -38,6 +38,9 @@ jobs:
         env:
           PROC_SAFE_NATIVE: require
         run: pnpm test --fileParallelism=false
+      - name: Diagnose handle accounting without changing failed assertions
+        if: failure()
+        run: node scripts/pr30-handle-diagnostic.mjs
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: 1.4.4
