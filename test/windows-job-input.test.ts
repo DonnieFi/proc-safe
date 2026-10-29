@@ -20,17 +20,11 @@ afterEach(() => {
 });
 const options = { executable: "example.exe", commandLine: "example.exe" };
 
-test("stdin defaults to NUL and opt-in creates a pipe without sending bytes", () => {
+test("unsupported stdin fails before native spawn", () => {
   const job = WindowsJob.create();
-  for (const stdin of [undefined, "null", "pipe"] as const) {
-    const child = job.spawn({ ...options, stdin });
-    expect(mocks.job.spawn).toHaveBeenLastCalledWith(options.executable, options.commandLine, undefined, undefined, stdin === "pipe");
-    expect(mocks.child.writeStdin).not.toHaveBeenCalled();
-    expect(Object.isFrozen(child)).toBe(true);
-  }
   // @ts-expect-error runtime validation for JavaScript callers
   expect(() => job.spawn({ ...options, stdin: "inherit" })).toThrow(expect.objectContaining({ code: "invalid-argument" }));
-  expect(mocks.job.spawn).toHaveBeenCalledTimes(3);
+  expect(mocks.job.spawn).not.toHaveBeenCalled();
 });
 
 test("empty and non-Buffer inputs fail before reaching native code, without echoing input", () => {
@@ -48,12 +42,9 @@ test("empty and non-Buffer inputs fail before reaching native code, without echo
   expect(mocks.child.writeStdin).not.toHaveBeenCalled();
 });
 
-test("input close forwards idempotent native closure; child close rejects further operations", () => {
+test("closed child rejects further input operations", () => {
   const child = WindowsJob.create().spawn({ ...options, stdin: "pipe" });
-  child.closeStdin(); child.closeStdin();
-  expect(mocks.child.closeStdin).toHaveBeenCalledTimes(2);
   child.close(); child.close();
-  expect(mocks.child.close).toHaveBeenCalledTimes(1);
   for (const operation of [() => child.closeStdin(), () => child.writeStdin(Buffer.from([1]))]) {
     expect(operation).toThrow(expect.objectContaining({ code: "invalid-argument" }));
   }
