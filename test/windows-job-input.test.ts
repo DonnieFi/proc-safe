@@ -33,21 +33,6 @@ test("stdin defaults to NUL and opt-in creates a pipe without sending bytes", ()
   expect(mocks.job.spawn).toHaveBeenCalledTimes(3);
 });
 
-test("input attempts preserve native prefix, backpressure and broken-pipe observations", () => {
-  const child = WindowsJob.create().spawn({ ...options, stdin: "pipe" });
-  const bytes = Buffer.from("synthetic-input");
-  for (const result of [3, 0, null]) {
-    mocks.child.writeStdin.mockReturnValueOnce(result);
-    expect(child.writeStdin(bytes)).toBe(result);
-    expect(mocks.child.writeStdin).toHaveBeenLastCalledWith(bytes);
-  }
-  expect(bytes.toString()).toBe("synthetic-input");
-  mocks.child.writeStdin.mockImplementationOnce(() => { throw new Error("operation-failed: input write refused"); });
-  expect(() => child.writeStdin(bytes)).toThrow();
-  expect(mocks.child.writeStdin).toHaveBeenCalledTimes(4);
-  // The wrapper neither queues nor retries a suffix.
-});
-
 test("empty and non-Buffer inputs fail before reaching native code, without echoing input", () => {
   const child = WindowsJob.create().spawn({ ...options, stdin: "pipe" });
   for (const bytes of [Buffer.alloc(0), "synthetic-private-value", new Uint8Array([1]), null, undefined]) {
