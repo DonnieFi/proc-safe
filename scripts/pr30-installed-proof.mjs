@@ -1,5 +1,6 @@
 // Fork-only evidence driver. No production loading override is used for input proof.
 import assert from 'node:assert/strict';
+import { resolveNpmCli } from './npm-cli.mjs';
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -7,6 +8,7 @@ import { join, resolve } from 'node:path';
 assert.equal(process.platform, 'win32');
 assert.equal(process.arch, 'arm64');
 const root = process.cwd();
+const npm = resolveNpmCli();
 const consumer = resolve('proof-consumer');
 mkdirSync(consumer);
 writeFileSync(join(consumer, 'package.json'), '{"private":true,"type":"module"}');
@@ -21,7 +23,7 @@ function run(executable, args, cwd = root, extra = {}) {
   if (r.error) throw r.error;
   assert.equal(r.status, 0, `${executable} exited ${r.status}`);
 }
-run(process.execPath, [process.env.npm_execpath, 'install', '--ignore-scripts', '--omit=optional', '--no-audit', '--no-fund', ...tarballs], consumer);
+run(process.execPath, [npm, 'install', '--ignore-scripts', '--omit=optional', '--no-audit', '--no-fund', ...tarballs], consumer);
 const installed = join(consumer, 'node_modules/@openclaw/proc-safe');
 const native = join(consumer, 'node_modules/@openclaw/proc-safe-win32-arm64-msvc/proc-safe-native.node');
 const digest = path => createHash('sha256').update(readFileSync(path)).digest('hex');

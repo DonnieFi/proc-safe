@@ -60,4 +60,4 @@ jobs:
       - name: Build and test separate fault addon
         run: node scripts/check-windows-job-fault.mjs
       - name: Installed package traces and separate adversarial traces
-        run: npm exec -- node scripts/pr30-installed-proof.mjs
+        run: node scripts/pr30-installed-proof.mjs
